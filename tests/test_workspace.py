@@ -10,6 +10,42 @@ from local_harness.workspace import Workspace, WorkspaceError
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_cell_edits_recalculate_dependent_formulas_on_other_sheets(self):
+        import openpyxl
+        from openpyxl.workbook.properties import CalcProperties
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            book = openpyxl.Workbook()
+            book.active.title = "Data"
+            book.active["A1"] = 2
+            book.create_sheet("Summary")["A1"] = "=Data!A1*3"
+            book.calculation = CalcProperties(calcMode="manual", calcOnSave=False, fullCalcOnLoad=False)
+            book.save(root / "report.xlsx")
+            book.close()
+            workspace = Workspace(root, autonomous=True)
+            workspace.set_cells("report.xlsx", "Data", "A1", [[5]])
+            self.assertEqual(workspace.read_excel("report.xlsx", "Summary", "A1")["values"], [[15]])
+
+    def test_reads_a_native_excel_addin_with_the_real_xlam_content_type(self):
+        from local_harness.excel_edit import excel_thread, native_book
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            @excel_thread
+            def fixture():
+                with native_book(root / "source.xlsx", create=True) as (book, app):
+                    book.Worksheets(1).Name = "Data"
+                    book.Worksheets(1).Range("A1").Value = "Real add-in fact"
+                    book.SaveAs(str(root / "addin.xlam"), FileFormat=55)
+
+            fixture()
+            target = root / "addin.xlam"
+            original = target.read_bytes()
+            with zipfile.ZipFile(target) as archive:
+                self.assertIn(b"application/vnd.ms-excel.addin.macroEnabled.main+xml", archive.read("[Content_Types].xml"))
+            self.assertEqual(Workspace(root).read_excel("addin.xlam", "Data", "A1")["values"], [["Real add-in fact"]])
+            self.assertEqual(target.read_bytes(), original)
+
     def test_cell_writes_preserve_text_identifiers_and_do_not_auto_convert_dates(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Workspace(temp, autonomous=True)

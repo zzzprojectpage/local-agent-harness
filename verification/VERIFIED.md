@@ -4,7 +4,7 @@
 
 ### Changed files / entry points
 
-- `local_harness/excel.py:12,102,135,176,204`: bounded OOXML/XLS/XLSB readers,
+- `local_harness/excel.py:14,104,126,159,200,228`: bounded OOXML/XLS/XLSB readers,
   template/add-in worksheet inspection, saved caches/formula source where supported.
 - `local_harness/excel_edit.py:27,49,81,306,388`: isolated STA worker per native action,
   pre-existing PID protection, native values/formulas/formatting/pivots and explicit VBA.
@@ -26,8 +26,8 @@ PowerShell, from `Desktop\Local Agent Harness`, with `$env:PYTHONDONTWRITEBYTECO
 | Command | Observed result |
 | --- | --- |
 | `cmd /c "Setup.cmd < nul"` | Fresh Python **3.12.7** virtual environment; all five pinned direct dependencies installed successfully; no global macro setting changed. |
-| `.venv\Scripts\python.exe -W error::ResourceWarning -m unittest discover -s tests -v` | **45 passed**, **108.724s**, no skips. |
-| `py -3.10 -W error::ResourceWarning -m unittest discover -s tests -v` | **45 passed**, **108.954s**, no skips. |
+| `.venv\Scripts\python.exe -W error::ResourceWarning -m unittest discover -s tests -v` | **47 passed**, **72.698s**, no skips. |
+| `py -3.10 -W error::ResourceWarning -m unittest discover -s tests -v` | **47 passed**, **96.442s**, no skips. |
 | `.venv\Scripts\python.exe -m compileall -q local_harness run.py verify_live.py verify_excel.py verify_desktop.py` | Passed. |
 | `py -3.10 -m compileall -q local_harness run.py verify_live.py verify_excel.py verify_desktop.py` | Passed. |
 | `git diff --check` | Passed. |
@@ -37,7 +37,8 @@ PowerShell, from `Desktop\Local Agent Harness`, with `$env:PYTHONDONTWRITEBYTECO
 | `Start-Process -FilePath $env:ComSpec -ArgumentList '/c','Launch.cmd' -WorkingDirectory (Get-Location).Path -PassThru` | Owned-process smoke: Launch.cmd created a visible Local Agent Harness window using the setup environment; the newly observed window closed normally through CloseMainWindow. Existing windows were excluded. |
 
 Native tests verify two-cell formula caches, relative formula fill, literal identifiers,
-format persistence, XLS/XLSB edits, original/backup preservation, failure cleanup,
+format persistence, dependent formulas across sheets, XLS/XLSB edits, a genuine native
+XLAM add-in's worksheet data, original/backup preservation, failure cleanup,
 VBA creation/import/explicit runs (cells **42** and **73**) and an existing `Auto_Open`
 procedure **not** invoked by opening/running another requested Sub. A deliberately infinite
 synthetic macro is stopped: no partial edit published, no new EXCEL.EXE remains, and a
@@ -59,6 +60,9 @@ The Excel project-access setting was already enabled here; tests did not enable 
   cancelled macro's temporary-file lock/cleanup failure.
 - Invariant number formats initially became localized grouping formats. Owned-instance
   separators are set temporarily and restored; saved **0.00** is verified independently.
+- A genuine native XLAM add-in exposed openpyxl's unsupported add-in MIME type, which
+  extension-only fixtures missed. Read-only XLAM handling adapts only the manifest in an
+  in-memory archive to the identical XLSM worksheet schema; the input hash remains unchanged.
 
 ### Review
 
@@ -84,7 +88,7 @@ synthetic Auto_Open regression support that behavior.
   not MiMo. Native/JSON protocol regression tests use deterministic model adapters.
 - Common formats are supported subject to 100 MB/expanded archive limits, protection and
   installed Excel. Damaged/encrypted/vendor-specific workbooks and every legacy file variant
-  are not universally supported. Synthetic XLSM/templates/add-in extensions were exercised;
+  are not universally supported. Synthetic XLSM/templates and a real native XLAM were exercised;
   this is not exhaustive fidelity testing of complex real-world add-ins/Power Query/slicers.
 - VBA execution is explicit trusted code, **not folder-confined or OS-sandboxed**. Events
   are disabled and global security is unchanged, but malicious VBA/XLM/add-ins/connections

@@ -1,9 +1,11 @@
 """Bounded, read-only Excel adapters. Nothing here saves workbooks or executes macros."""
 
 import importlib
+import io
 import json
 import math
 import re
+import shutil
 import zipfile
 from contextlib import ExitStack
 from datetime import date, datetime, time
@@ -99,10 +101,30 @@ def select_sheet(names, requested):
     return requested
 
 
+def xml_stream(path):
+    if path.suffix.lower() != ".xlam":
+        return path.open("rb")
+    # openpyxl does not recognize the XLAM MIME type. Adapt only an in-memory
+    # archive's manifest to the identical XLSM worksheet schema; never resave the input.
+    output = io.BytesIO()
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            if info.filename == "[Content_Types].xml":
+                manifest = source.read(info).replace(
+                    b"application/vnd.ms-excel.addin.macroEnabled.main+xml",
+                    b"application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+                target.writestr(info, manifest)
+            else:
+                with source.open(info) as reader, target.open(info, "w") as writer:
+                    shutil.copyfileobj(reader, writer, 65536)
+    output.seek(0)
+    return output
+
+
 def open_xml(path, sheet=None, cell_range=None):
     module = dependency("openpyxl")
     with ExitStack() as stack:
-        stream = stack.enter_context(path.open("rb"))
+        stream = stack.enter_context(xml_stream(path))
         book = module.load_workbook(stream, read_only=True, data_only=False, keep_links=False)
         stack.callback(book.close)
         names = [ws.title for ws in book.worksheets]
@@ -116,7 +138,7 @@ def open_xml(path, sheet=None, cell_range=None):
                     "note": "Formula values are cached, not calculated. Charts, VBA and external data are not executed."}
         name = select_sheet(names, sheet)
         c1, r1, c2, r2 = bounds(cell_range)
-        cache_stream = stack.enter_context(path.open("rb"))
+        cache_stream = stack.enter_context(xml_stream(path))
         cached = module.load_workbook(cache_stream, read_only=True, data_only=True, keep_links=False)
         stack.callback(cached.close)
         kwargs = dict(min_row=r1, max_row=r2, min_col=c1, max_col=c2)
