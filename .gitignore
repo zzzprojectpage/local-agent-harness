@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+data/
+verification/*.png
+
+# Local credentials and runtime backups must never be published.
+.env
+.env.*
+credentials.json
+secrets.json
+*.pem
+*.key
+*.pfx
+*.p12
+.local-harness-backups/
+
+# Ollama/model weights are installed separately, never stored in this repository.
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.ckpt

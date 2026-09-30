@@ -1,0 +1,3 @@
+This is the harness verification file.
+Verification code: HARNESS-4821
+Use the read_file tool to read this file from the chosen working folder.
