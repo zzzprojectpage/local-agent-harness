@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.venv/
 data/
 verification/*.png
 
@@ -20,3 +21,7 @@ secrets.json
 *.pt
 *.pth
 *.ckpt
+
+# Temporary copies and diagnostics from local verification are not source artifacts.
+.harness-stage-*
+*.harness-*

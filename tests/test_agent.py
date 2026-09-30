@@ -29,6 +29,94 @@ class ModelAdapter:
 
 
 class AgentTests(unittest.TestCase):
+    def test_conversational_create_or_set_requests_do_not_require_a_file_edit(self):
+        for prompt in ("Create a plan for my weekend", "Set the record straight about this claim"):
+            with self.subTest(prompt=prompt), tempfile.TemporaryDirectory() as temp:
+                adapter = ModelAdapter([{"content": "A conversational answer."}])
+                self.assertEqual(Agent(adapter, "selected", Workspace(temp, autonomous=True)).run(prompt), "A conversational answer.")
+
+    def test_failed_edit_cannot_be_presented_as_success_and_gets_a_correction_attempt(self):
+        import openpyxl
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            book = openpyxl.Workbook()
+            book.active.title = "Data"
+            book.save(root / "book.xlsx")
+            book.close()
+            adapter = ModelAdapter([
+                {"tool_calls": [{"function": {"name": "set_cells", "arguments": {"path": "book.xlsx"}}}]},
+                {"content": "FALSE SUCCESS"},
+                {"tool_calls": [{"function": {"name": "set_cells", "arguments": {
+                    "path": "book.xlsx", "sheet": "Data", "cell_range": "A1", "values": [[42]]}}}]},
+                {"content": "Verified result is 42."},
+            ])
+            events = []
+            workspace = Workspace(root, autonomous=True)
+            agent = Agent(adapter, "selected", workspace, options={"num_ctx": 8192, "num_predict": 768},
+                          on_event=lambda k,v: events.append((k,v)))
+            self.assertEqual(agent.run("Set A1 to 42 in book.xlsx"), "Verified result is 42.")
+            self.assertNotIn("FALSE SUCCESS", str(events))
+            self.assertEqual(workspace.read_excel("book.xlsx", "Data", "A1")["values"], [[42]])
+
+    def test_empty_native_reply_recovers_once_using_the_same_model_and_json(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "notes.txt").write_text("42", encoding="utf-8")
+            adapter = ModelAdapter([
+                {"content": "", "thinking": "Private reasoning must not be exposed", "stats": {"done_reason": "length", "eval_count": 768}},
+                {"content": '{"tool":"read_file","arguments":{"path":"notes.txt"}}'},
+                {"content": "42"},
+            ])
+            events = []
+            answer = Agent(adapter, "selected", Workspace(root), on_event=lambda k,v: events.append((k,v))).run("Read notes.txt")
+            self.assertEqual(answer, "42")
+            self.assertTrue(adapter.requests[0][2]["tools"])
+            self.assertIsNone(adapter.requests[1][2]["tools"])
+            self.assertTrue(all(r[0] == "selected" for r in adapter.requests))
+            self.assertNotIn("Private reasoning", str(events))
+
+    def test_repeated_empty_reply_reports_safe_counts_not_reasoning_or_false_success(self):
+        adapter = ModelAdapter([{ "thinking": "Do not print this", "stats": {"done_reason": "length", "eval_count": 768}}] * 2)
+        with self.assertRaisesRegex(OllamaError, r"thinking=17.*reason=length") as error:
+            Agent(adapter, "selected").run("Hello")
+        self.assertNotIn("Do not print this", str(error.exception))
+        self.assertEqual(len(adapter.requests), 2)
+
+    def test_model_can_call_native_excel_edit_tools_and_read_the_saved_result(self):
+        import openpyxl
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            book = openpyxl.Workbook()
+            book.active.title = "Data"
+            book.save(root / "book.xlsx")
+            book.close()
+            adapter = ModelAdapter([
+                {"tool_calls": [{"function": {"name": "set_cells", "arguments": {
+                    "path": "book.xlsx", "sheet": "Data", "cell_range": "A1:B1", "values": [[7, "=A1*3"]]}}}]},
+                {"tool_calls": [{"function": {"name": "read_excel", "arguments": {
+                    "path": "book.xlsx", "sheet": "Data", "cell_range": "A1:B1"}}}]},
+                {"content": "The saved values are 7 and 21."},
+            ])
+            workspace = Workspace(root, autonomous=True)
+            Agent(adapter, "test", workspace, options={"num_ctx": 8192, "num_predict": 768}).run("Write values and a formula in book.xlsx")
+            self.assertEqual(workspace.read_excel("book.xlsx", "Data", "A1:B1")["values"], [[7, 21]])
+            names = {t["function"]["name"] for t in adapter.requests[0][2]["tools"]}
+            self.assertIn("create_pivot", names)
+            self.assertIn("create_vba_module", names)
+            self.assertIn('21', adapter.requests[-1][1][-1]["content"])
+
+    def test_simple_folder_listing_works_even_when_the_model_cannot_answer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "example.xlsx").write_bytes(b"Binary filename fixture, not opened")
+            adapter = ModelAdapter([{"content": "", "stats": {"done_reason": "stop"}}])
+            events = []
+            agent = Agent(adapter, "mimo-test", Workspace(root), on_event=lambda k, v: events.append((k, v)))
+            answer = agent.run("Tell me what files are inside that folder")
+            self.assertIn("example.xlsx", answer)
+            self.assertIn("harness", answer.lower())
+            self.assertEqual(adapter.requests, [], "Filename listing must not depend on model generation.")
+
     def test_native_file_call_returns_real_contents_to_the_selected_model(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

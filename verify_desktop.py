@@ -49,7 +49,7 @@ def main():
             assert app.status_text.get().startswith("Finished"), transcript
             print("PASS: live desktop Qwen selection + folder picker + file call + visible answer", flush=True)
             if args.screenshot:
-                # Pillow is optional, verification-only; the desktop app itself remains stdlib-only.
+                # Pillow is optional and verification-only, not an application dependency.
                 from PIL import ImageGrab
                 root.lift()
                 root.update()

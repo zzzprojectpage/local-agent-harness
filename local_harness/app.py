@@ -10,13 +10,14 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .agent import Agent, Attachment
+from .excel import ExcelError, is_workbook, workbook_preview
 from .ollama import Cancelled, OllamaClient, OllamaError
 from .workspace import Workspace, WorkspaceError, is_sensitive, read_text_file
 
 APP_DIR = Path(__file__).resolve().parent.parent
 MIMO_MODELS = [f"mimo-2.6-{level}{suffix}" for level in ("low", "medium", "high") for suffix in ("-fast", "")]
 DEFAULTS = {"url": "http://127.0.0.1:11434", "model": "qwen3:0.6b", "num_ctx": 4096,
-            "num_predict": 768, "tool_mode": "auto", "think": False}
+            "num_predict": 768, "tool_mode": "auto", "think": False, "autonomous": True}
 COLORS = {"bg": "#111519", "panel": "#1A2027", "input": "#0D1116", "text": "#F1F5F9",
           "muted": "#A3AFBF", "border": "#566273", "accent": "#A7F3D0", "error": "#FCA5A5"}
 
@@ -64,6 +65,7 @@ def load_settings(directory):
                 settings.get("num_predict", 768) not in (128, 256, 512, 768, 1024, 2048) or
                 settings.get("tool_mode", "auto") not in ("auto", "native", "json") or
                 type(settings.get("think", False)) is not bool or
+                type(settings.get("autonomous", True)) is not bool or
                 not isinstance(settings.get("model", ""), str) or
                 settings.get("num_predict", 768) >= settings.get("num_ctx", 4096) // 2):
             return defaults
@@ -83,6 +85,7 @@ class HarnessApp:
         self.events = self.channel.events
         self.installed_models = set()
         self.workspace = None
+        self.allow_vba = False  # Never persisted; consent is for this folder/session only.
         self.attachments = []
         self.agent = None
         self.busy = False
@@ -200,6 +203,8 @@ class HarnessApp:
         self.folder_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.clear_folder_button = ttk.Button(folder_actions, text="Clear", command=self.clear_folder)
         self.clear_folder_button.grid(row=0, column=1)
+        self.files_button = ttk.Button(folder_actions, text="List files (no model)", command=self.list_folder_files)
+        self.files_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Label(side, text="ATTACHMENTS", style="Section.TLabel").grid(row=8, column=0, sticky="w", pady=(28, 8))
         self.attach_button = ttk.Button(side, text="Attach files…", command=self.attach_files)
         self.attach_button.grid(row=9, column=0, sticky="ew")
@@ -209,8 +214,10 @@ class HarnessApp:
         self.attachments_list.grid(row=10, column=0, sticky="ew", pady=8)
         self.remove_button = ttk.Button(side, text="Remove selected", command=self.remove_attachment)
         self.remove_button.grid(row=11, column=0, sticky="ew")
-        ttk.Label(side, text="Text, code, Markdown and CSV.\nExcerpts are sent with your next message.", style="Muted.TLabel", wraplength=226).grid(row=12, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(side, text="LOCAL BY DESIGN\nFolder-scoped reads. Approved writes.\nNo shell. No cloud fallback.", style="Muted.TLabel", wraplength=226).grid(row=16, column=0, sticky="sw", pady=(24, 0))
+        ttk.Label(side, text="Text, CSV and Excel workbooks.\nRead-only previews accompany your next message. Choose the folder to edit.", style="Muted.TLabel", wraplength=226).grid(row=12, column=0, sticky="w", pady=(8, 0))
+        self.permission_text = tk.StringVar()
+        self._permissions()
+        ttk.Label(side, textvariable=self.permission_text, style="Muted.TLabel", wraplength=226).grid(row=16, column=0, sticky="sw", pady=(24, 0))
         main = ttk.Frame(body)
         main.grid(row=0, column=1, sticky="nsew")
         main.rowconfigure(0, weight=1)
@@ -254,8 +261,13 @@ class HarnessApp:
 
     def _welcome(self):
         self._append("A quiet place for your local agents.\n", "role")
-        self._append("Choose an installed Ollama model. Attach a text file, or choose a folder so the agent can read, search and propose edits.\n\n"
-                     "Every edit needs your approval. Switching models or folders starts a fresh chat. MiMo presets marked not installed will never switch to another model.\n", "muted")
+        self._append("Choose an installed Ollama model and a working folder. The agent can inspect Excel, edit values/formulas, format cells and create native PivotTables on backed-up copies.\n\n"
+                     "Autonomous copies are on by default. VBA creation needs Excel's trusted project-access setting; execution needs the session opt-in in Settings. List files or /files works without a model. Uninstalled models never fall back.\n", "muted")
+
+    def _permissions(self):
+        if hasattr(self, "permission_text"):
+            mode = "Autonomous work copies" if self.settings["autonomous"] else "Safe mode: approved text writes"
+            self.permission_text.set("LOCAL BY DESIGN\n" + mode + "\nVBA execution: " + ("trusted / enabled" if self.allow_vba else "off") + "\nNo cloud fallback. VBA is not sandboxed.")
 
     def _save(self):
         try:
@@ -327,24 +339,43 @@ class HarnessApp:
         if not path or not self._confirm_reset("Changing the working folder"):
             return
         try:
-            self.workspace = Workspace(path)
+            self.workspace = Workspace(path, autonomous=self.settings["autonomous"])
         except (WorkspaceError, OSError) as exc:
             messagebox.showerror("Cannot use folder", str(exc), parent=self.root)
             return
         self.folder_text.set(str(self.workspace.root))
+        self.allow_vba = False
+        self._permissions()
         self._reset()
 
     def clear_folder(self):
         if not self.busy and self.workspace and self._confirm_reset("Clearing the working folder"):
             self.workspace = None
+            self.allow_vba = False
+            self._permissions()
             self.folder_text.set("No folder selected\nAttachments-only chat")
             self._reset()
+
+    def list_folder_files(self):
+        if self.busy:
+            return
+        if not self.workspace:
+            self.status_text.set("Choose a working folder first.")
+            return
+        try:
+            files = self.workspace.list_files()
+            self._append("\nVerified folder files (harness; no model)\n", "role")
+            self._append("\n".join(files) + "\n" if files else "[No accessible files found.]\n", "tool")
+            self.status_text.set(f"Listed {len(files)} files (100 maximum); no inference required.")
+        except (WorkspaceError, OSError) as exc:
+            self.status_text.set(str(exc))
 
     def attach_files(self):
         if self.busy:
             return
-        paths = filedialog.askopenfilenames(title="Attach text, code, Markdown or CSV", parent=self.root,
-                                            filetypes=[("Text, code and CSV", "*.txt *.md *.csv *.tsv *.py *.json *.js *.ts *.ps1"), ("All files", "*.*")])
+        paths = filedialog.askopenfilenames(title="Attach Excel, text, code or CSV", parent=self.root,
+                                            filetypes=[("Excel workbooks", "*.xlsx *.xlsm *.xlsb *.xls *.xltx *.xltm *.xlt *.xlam"),
+                                                       ("Text, code and CSV", "*.txt *.md *.csv *.tsv *.py *.json *.js *.ts *.ps1 *.bas"), ("All files", "*.*")])
         for name in paths:
             try:
                 if len(self.attachments) >= 6:
@@ -352,7 +383,7 @@ class HarnessApp:
                 path = Path(name).resolve(strict=True)
                 if is_sensitive(path):
                     raise WorkspaceError("Sensitive files and paths cannot be attached.")
-                text = read_text_file(path)
+                text = workbook_preview(path) if is_workbook(path) else read_text_file(path)
                 remaining = 6000 - sum(len(item.text) for item in self.attachments)
                 if remaining < 300:
                     raise WorkspaceError("The 6,000-character attachment budget is full. Remove files or choose a folder.")
@@ -360,10 +391,10 @@ class HarnessApp:
                 excerpt = text[:limit]
                 truncated = len(text) > limit
                 if truncated:
-                    excerpt += "\n[Attachment excerpt truncated. Choose its folder to read more lines.]"
+                    excerpt += "\n[Attachment excerpt truncated. Choose its folder to read more cells/lines.]"
                 self.attachments.append(Attachment(path.name, excerpt))
                 self.attachments_list.insert("end", path.name + (" · excerpt" if truncated else ""))
-            except (OSError, WorkspaceError) as exc:
+            except (OSError, WorkspaceError, ExcelError) as exc:
                 messagebox.showerror("Cannot attach file", f"{Path(name).name}:\n{exc}", parent=self.root)
 
     def remove_attachment(self):
@@ -375,7 +406,7 @@ class HarnessApp:
     def _set_busy(self, busy):
         self.busy = busy
         for widget in (self.send_button, self.new_button, self.settings_button, self.folder_button,
-                       self.clear_folder_button, self.attach_button, self.remove_button):
+                       self.clear_folder_button, self.files_button, self.attach_button, self.remove_button):
             widget.configure(state="disabled" if busy else "normal")
         self.model_box.configure(state="disabled" if busy else "normal")
         self.refresh_button.configure(state="disabled" if busy or self.refreshing else "normal")
@@ -502,6 +533,10 @@ class HarnessApp:
                     self._append("  Tool refused: " + result["error"] + "\n", "error")
                 elif isinstance(result, dict) and result.get("status"):
                     self._append("  Write: " + result["status"] + (" · backup: " + result["backup"] if result.get("backup") else "") + "\n", "tool")
+                    if result.get("output_path") and self.workspace:
+                        self._append("  Output: " + str(self.workspace.root / result["output_path"]) + "\n", "tool")
+            elif kind == "diagnostic":
+                self._append("\n  Model response counts (no content): " + json.dumps(value) + "\n", "muted")
             elif kind == "approval":
                 request, answer, ready = value
                 self.pending_approval = (answer, ready)
@@ -566,7 +601,11 @@ class HarnessApp:
         update_response_choices()
         thinking = tk.BooleanVar(value=self.settings["think"])
         ttk.Checkbutton(frame, text="Enable model thinking (slower; model must support it)", variable=thinking).grid(row=5, column=0, columnspan=2, sticky="w", pady=12)
-        ttk.Label(frame, text="Auto uses native tools when supported. JSON is the compatibility mode for models/templates with broken native calls.\n\n4096 context is the laptop-friendly default. No cloud endpoints, API keys, command execution or automatic model downloads.", wraplength=490, foreground=COLORS["muted"]).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 18))
+        autonomous = tk.BooleanVar(value=self.settings["autonomous"])
+        vba = tk.BooleanVar(value=self.allow_vba)
+        ttk.Checkbutton(frame, text="Autonomous edits on backed-up working copies (no per-edit prompts)", variable=autonomous).grid(row=6, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Checkbutton(frame, text="Allow trusted VBA execution in this folder/session", variable=vba).grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Label(frame, text="VBA is NOT sandboxed: code can access your PC and files outside the folder. Enable only for trusted code/workbooks. Existing workbook events/autorun macros are not requested. Requires Excel's 'Trust access to the VBA project object model' (VBA-SETUP.md).\n\nAuto uses native tools; JSON is for incompatible templates. 4096 context is the small default; 8192 is useful for multi-step Excel tasks. No cloud or model downloads.", wraplength=530, foreground=COLORS["muted"]).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 18))
 
         def save():
             try:
@@ -577,19 +616,27 @@ class HarnessApp:
                 if values["num_predict"] >= values["num_ctx"] // 2:
                     raise ValueError("Response limit must be less than half the context.")
                 values["think"] = thinking.get()
+                values["autonomous"] = autonomous.get()
+                if vba.get() and (not self.workspace or not values["autonomous"]):
+                    raise ValueError("Choose a folder and enable autonomous work copies before allowing VBA execution.")
             except (ValueError, OllamaError) as exc:
                 messagebox.showerror("Invalid settings", str(exc), parent=window)
                 return
             if not self._confirm_reset("Changing settings"):
                 return
             self.settings.update(values)
+            self.allow_vba = vba.get()
+            if self.workspace:
+                self.workspace.autonomous = values["autonomous"]
+                self.workspace.allow_vba = self.allow_vba
+            self._permissions()
             self._save()
             self._reset()
             window.destroy()
             self.refresh_models()
 
-        ttk.Button(frame, text="Save settings", style="Accent.TButton", command=save).grid(row=7, column=1, sticky="e")
-        ttk.Button(frame, text="Cancel", command=window.destroy).grid(row=7, column=0, sticky="w")
+        ttk.Button(frame, text="Save settings", style="Accent.TButton", command=save).grid(row=9, column=1, sticky="e")
+        ttk.Button(frame, text="Cancel", command=window.destroy).grid(row=9, column=0, sticky="w")
 
     def close(self):
         self.channel.closed.set()

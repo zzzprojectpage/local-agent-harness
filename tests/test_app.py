@@ -1,5 +1,6 @@
 import tempfile
 import gc
+import json
 import time
 import tkinter as tk
 import unittest
@@ -51,6 +52,48 @@ class DesktopWriteAdapter(DesktopModelAdapter):
 
 
 class DesktopTests(unittest.TestCase):
+    def test_vba_consent_is_saved_only_in_this_folder_session_not_preferences(self):
+        root = Path(self.temp.name)
+        with patch("local_harness.app.filedialog.askdirectory", return_value=str(root)):
+            self.app.folder_button.invoke()
+        self.app.settings_button.invoke()
+
+        def widgets(parent):
+            for child in parent.winfo_children():
+                yield child
+                yield from widgets(child)
+
+        consent = next(w for w in widgets(self.root) if w.winfo_class() == "TCheckbutton" and w.cget("text") == "Allow trusted VBA execution in this folder/session")
+        consent.invoke()
+        save = next(w for w in widgets(self.root) if w.winfo_class() == "TButton" and w.cget("text") == "Save settings")
+        save.invoke()
+        self.assertTrue(self.app.workspace.allow_vba)
+        preferences = json.loads((root / "data" / "settings.json").read_text(encoding="utf-8"))
+        self.assertNotIn("allow_vba", preferences)
+        with patch("local_harness.app.filedialog.askdirectory", return_value=str(root)):
+            self.app.folder_button.invoke()
+        self.assertFalse(self.app.workspace.allow_vba)
+
+    def test_excel_attachment_and_folder_browse_do_not_require_inference(self):
+        import openpyxl
+        root = Path(self.temp.name)
+        file = root / "book.xlsx"
+        book = openpyxl.Workbook()
+        book.active["A1"] = "Workbook fact"
+        book.save(file)
+        book.close()
+        with patch("local_harness.app.filedialog.askdirectory", return_value=str(root)):
+            self.app.folder_button.invoke()
+        with patch("local_harness.app.filedialog.askopenfilenames", return_value=(str(file),)), patch("local_harness.app.messagebox.showerror") as error:
+            self.app.attach_button.invoke()
+        self.assertFalse(error.called)
+        self.assertIn("Workbook fact", self.app.attachments[0].text)
+        self.app.files_button.invoke()
+        self.assertIn("book.xlsx", self.app.transcript.get("1.0", "end"))
+        self.assertEqual(DesktopModelAdapter.requests, [])
+        self.assertTrue(self.app.workspace.autonomous)
+        self.assertFalse(self.app.workspace.allow_vba)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = tk.Tk()
@@ -113,6 +156,7 @@ class DesktopTests(unittest.TestCase):
         target = root / "notes.txt"
         target.write_text("original\n", encoding="utf-8")
         self.app.client_factory = DesktopWriteAdapter
+        self.app.settings["autonomous"] = False  # Explicitly exercise retained safe/approval mode.
         with patch("local_harness.app.filedialog.askdirectory", return_value=str(root)):
             self.app.folder_button.invoke()
         choice = "Allow this write" if allow else "Deny"
